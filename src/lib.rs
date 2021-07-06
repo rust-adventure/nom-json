@@ -1,19 +1,27 @@
 use nom::{
     branch::alt,
-    bytes::complete::{escaped, tag, take, take_while_m_n},
+    bytes::complete::{escaped, tag, take, take_until, take_while, take_while_m_n},
     character::{
-        complete::{alpha0, alpha1, alphanumeric1, char, digit1, hex_digit1, multispace0, one_of},
+        complete::{
+            alpha0, alpha1, alphanumeric1, char, digit1, hex_digit1, multispace0, one_of, satisfy,
+        },
         is_hex_digit,
     },
-    combinator::{opt, peek, verify},
-    error::{Error, ErrorKind},
-    multi::separated_list0,
+    combinator::{not, opt, peek, verify},
+    error::{Error, ErrorKind, ParseError},
+    multi::{many0, many1, separated_list0, separated_list1},
     number::complete::float,
     sequence::{delimited, pair, tuple},
-    IResult, Parser,
+    AsChar, IResult, InputTakeAtPosition, Parser,
 };
 
 pub fn json<'a>(input: &'a str) -> IResult<&'a str, Value<'a>> {
+    println!(
+        "\n\nPARSING
+{}
+vvv",
+        &input
+    );
     let (input, parsed_json) = value(input)?;
     Ok((input, parsed_json))
 }
@@ -29,6 +37,7 @@ pub enum Value<'a> {
     Null,
 }
 fn value(input: &str) -> IResult<&str, Value> {
+    println!("> as value");
     alt((
         object,
         array,
@@ -41,6 +50,7 @@ fn value(input: &str) -> IResult<&str, Value> {
 }
 
 fn object(input: &str) -> IResult<&str, Value> {
+    println!(">> as object");
     let (input, parsed_members) = delimited(tag("{"), members, tag("}"))(input)?;
     Ok((
         input,
@@ -85,6 +95,7 @@ fn member<'a>(input: &'a str) -> IResult<&str, Member<'a>> {
 // // ws string ws ':' element
 
 fn array(input: &str) -> IResult<&str, Value> {
+    println!(">> as array {}", &input);
     let (input, _) = char('[')(input)?;
     let (input, values) = opt(elements)(input)?;
     let (input, _) = char(']')(input)?;
@@ -107,9 +118,13 @@ fn element(input: &str) -> IResult<&str, Value> {
 // // ws value ws
 
 fn string(input: &str) -> IResult<&str, Value> {
+    println!(">> as string {}", &input);
     let (input, _) = char('"')(input)?;
+    println!(">>> input1: {}", &input);
     let (input, s) = opt(characters)(input)?;
+    println!(">>> input2: {} {:?}", &input, s);
     let (input, _) = char('"')(input)?;
+    println!(">>> input3: {}", &input);
     Ok((
         input,
         Value::String(match s {
@@ -119,15 +134,52 @@ fn string(input: &str) -> IResult<&str, Value> {
     ))
 }
 
+fn chars(i: &str) -> IResult<&str, char> {
+    satisfy(|c| !c.is_ascii_control() && c != '"' && c != '\\')(i)
+}
+
 fn characters(input: &str) -> IResult<&str, &str> {
-    escaped(alphanumeric1, '\\', one_of(r#""\/bfnrtu"#))(input)
+    verify(
+        escaped(chars, '\\', one_of(r#""\/bfnrtu"#)),
+        |maybe_hex: &str| {
+            dbg!("maybe_hex_check");
+            match validate_all_escaped_hex(maybe_hex) {
+                Err(_) => {
+                    dbg!("falsefalsefalse");
+                    false
+                }
+                Ok((input, output)) => {
+                    dbg!("truetruetrue", &output);
+                    output.iter().all(|s| escaped_hex(s).is_ok())
+                }
+            }
+        },
+    )(input)
 }
 fn escaped_hex(arg_input: &str) -> IResult<&str, &str> {
     let (input, _u) = tag("\\u")(arg_input)?;
     let (_input, _hex) = verify(hex_digit1, |hex: &str| hex.len() == 4)(input)?;
     take(4 + _u.len())(arg_input)
 }
-// // hex_digit
+
+fn validate_all_escaped_hex(arg_input: &str) -> IResult<&str, &str> {
+    dbg!("any_escaped_hex");
+    let res: IResult<&str, &str> = take_until("\\u")(arg_input);
+    dbg!("any_escaped_hex_2");
+    match res {
+        Err(_) => {
+            dbg!("any_escaped_hex err");
+            let (_input, _u) = tag("\\u")(arg_input)?;
+            take(4 + _u.len())(arg_input)
+        }
+        Ok((pls_input, _)) => {
+            dbg!("any_escaped_hex ok");
+            let (_input, _u) = tag("\\u")(pls_input)?;
+            dbg!("any_escaped_hex ok 2");
+            take(4 + _u.len())(pls_input)
+        }
+    }
+}
 
 fn number(input: &str) -> IResult<&str, Value> {
     let (input, (i, f, e)) = tuple((integer, opt(fraction), opt(exponent)))(input)?;
@@ -141,14 +193,14 @@ fn number(input: &str) -> IResult<&str, Value> {
         e.unwrap_or("")
     );
     // let (input, num) = float(input)?;
-    dbg!("parsing {}", &num_str);
+    println!("parsing {}", &num_str);
     let num = num_str.parse::<f32>().expect("expected a valid float");
     Ok((input, Value::Number(num)))
 }
 
 fn integer(arg_input: &str) -> IResult<&str, &str> {
     let (input, neg) = opt(char('-'))(arg_input)?;
-    let (_input, nums) = digit1(input)?;
+    let (_input, nums) = verify(digit1, |s: &str| !(s.starts_with("0") && s.len() != 1))(input)?;
     let (input, output) = take(
         nums.len()
             + match neg {
